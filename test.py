@@ -1,96 +1,72 @@
-import tensorflow as tf
-from transformers import TFBertForSequenceClassification, BertTokenizer
-from tensorflow.keras.optimizers import Adam
-from tensorflow.keras.losses import SparseCategoricalCrossentropy
-from tensorflow.keras.metrics import SparseCategoricalAccuracy
-
 import pandas as pd
-import numpy as np
+import re
+import nltk
 from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.preprocessing import LabelEncoder
+from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score, precision_recall_fscore_support
+from sklearn.multiclass import OneVsRestClassifier
+from nltk.corpus import stopwords
 
-# Load the datasets
-train_data = pd.read_csv('./training.csv')
-val_data = pd.read_csv('./validation.csv')
-test_data = pd.read_csv('./test.csv')
+# Download stopwords
+nltk.download('stopwords')
+stop_words = set(stopwords.words('english'))
 
-# Basic preprocessing
-def preprocess_text(df):
-    df['cleaned_text'] = df['text'].str.lower().str.replace(r'[^\w\s]', '')
-    return df
+# Load data
+train_data = pd.read_csv('./goemotions/train.tsv', sep='\t', header=None)
+val_data = pd.read_csv('./goemotions/dev.tsv', sep='\t', header=None)
+test_data = pd.read_csv('./goemotions/test.tsv', sep='\t', header=None)
 
-train_data = preprocess_text(train_data)
-val_data = preprocess_text(val_data)
-test_data = preprocess_text(test_data)
+# Columns: 0 is text, 1 is label(s)
+train_texts = train_data[0]
+train_labels = train_data[1]
+val_texts = val_data[0]
+val_labels = val_data[1]
+test_texts = test_data[0]
+test_labels = test_data[1]
 
-# Encode labels
-label_encoder = LabelEncoder()
-y_train = label_encoder.fit_transform(train_data['label'])
-y_val = label_encoder.transform(val_data['label'])
-y_test = label_encoder.transform(test_data['label'])
+# Function to preprocess text
+def preprocess_text(text):
+    text = text.lower()  # Lowercase
+    text = re.sub(r'[^a-z\s]', '', text)  # Remove special characters
+    text = ' '.join([word for word in text.split() if word not in stop_words])  # Remove stopwords
+    return text
 
-X_train = train_data['cleaned_text']
-X_val = val_data['cleaned_text']
-X_test = test_data['cleaned_text']
+# Apply preprocessing to train, validation, and test sets
+train_texts = train_texts.apply(preprocess_text)
+val_texts = val_texts.apply(preprocess_text)
+test_texts = test_texts.apply(preprocess_text)
 
+# Vectorize text using TF-IDF
+vectorizer = TfidfVectorizer(max_features=10000, ngram_range=(1, 2))
+X_train = vectorizer.fit_transform(train_texts)
+X_val = vectorizer.transform(val_texts)
+X_test = vectorizer.transform(test_texts)
 
-# Load BERT tokenizer and model
-tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
-model = TFBertForSequenceClassification.from_pretrained('bert-base-uncased', num_labels=num_labels)
+# Initialize and train the Logistic Regression model using One-vs-Rest strategy
+clf = OneVsRestClassifier(LogisticRegression(max_iter=1000))
+clf.fit(X_train, train_labels)
 
-# Tokenization function
-def tokenize_data(data, max_length=128):
-    return tokenizer(
-        data['text'].tolist(),
-        max_length=max_length,
-        padding='max_length',
-        truncation=True,
-        return_tensors='tf'
-    )
+# Predict on validation set
+val_preds = clf.predict(X_val)
 
-# Tokenize datasets
-X_train = tokenize_data(train_data)
-X_val = tokenize_data(val_data)
-X_test = tokenize_data(test_data)
+# Evaluate the model on the validation set
+val_accuracy = accuracy_score(val_labels, val_preds)
+val_precision, val_recall, val_f1, _ = precision_recall_fscore_support(val_labels, val_preds, average='macro')
 
-# Prepare TensorFlow dataset objects
-train_dataset = tf.data.Dataset.from_tensor_slices((
-    {
-        'input_ids': X_train['input_ids'], 
-        'attention_mask': X_train['attention_mask'], 
-        'token_type_ids': X_train['token_type_ids']
-    },
-    y_train
-)).batch(32).shuffle(1000)
+print(f"Validation Accuracy: {val_accuracy:.4f}")
+print(f"Validation Precision: {val_precision:.4f}")
+print(f"Validation Recall: {val_recall:.4f}")
+print(f"Validation F1-Score: {val_f1:.4f}")
 
-val_dataset = tf.data.Dataset.from_tensor_slices((
-    {
-        'input_ids': X_val['input_ids'], 
-        'attention_mask': X_val['attention_mask'], 
-        'token_type_ids': X_val['token_type_ids']
-    },
-    y_val
-)).batch(32)
+# Predict on test set
+test_preds = clf.predict(X_test)
 
-test_dataset = tf.data.Dataset.from_tensor_slices((
-    {
-        'input_ids': X_test['input_ids'], 
-        'attention_mask': X_test['attention_mask'], 
-        'token_type_ids': X_test['token_type_ids']
-    },
-    y_test
-)).batch(32)
+# Evaluate the model on the test set
+test_accuracy = accuracy_score(test_labels, test_preds)
+test_precision, test_recall, test_f1, _ = precision_recall_fscore_support(test_labels, test_preds, average='macro')
 
-# Compile the model
-model.compile(
-    optimizer=Adam(learning_rate=2e-5),
-    loss=SparseCategoricalCrossentropy(from_logits=True),
-    metrics=[SparseCategoricalAccuracy('accuracy')]
-)
-
-# Train the model
-history = model.fit(
-    train_dataset,
-    validation_data=val_dataset,
-    epochs=3
-)
+print(f"Test Accuracy: {test_accuracy:.4f}")
+print(f"Test Precision: {test_precision:.4f}")
+print(f"Test Recall: {test_recall:.4f}")
+print(f"Test F1-Score: {test_f1:.4f}")
